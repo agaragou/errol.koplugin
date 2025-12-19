@@ -132,6 +132,19 @@ function SettingsManager.set_date_day_first(val)
     if s then s:saveSetting("errol_date_day_first", val) end
 end
 
+function SettingsManager.is_spoiler_enabled()
+    local s = SettingsManager.get_global_settings()
+    if s and s:has("errol_spoiler_enabled") then
+        return s:isTrue("errol_spoiler_enabled")
+    end
+    return false -- Default False
+end
+
+function SettingsManager.set_spoiler_enabled(val)
+    local s = SettingsManager.get_global_settings()
+    if s then s:saveSetting("errol_spoiler_enabled", val) end
+end
+
 --------------------------------------------------------------------------------
 -- Cache Manager
 --------------------------------------------------------------------------------
@@ -266,6 +279,8 @@ function TelegramExporter.html_to_markdown(text)
     t = t:gsub("<b>(.-)</b>", "**%1**")
     -- Convert italic
     t = t:gsub("<i>(.-)</i>", "*%1*")
+    -- Convert spoiler
+    t = t:gsub('<span class="tg%-spoiler">(.-)</span>', "||%1||")
     -- Convert blockquote (handle multiline)
     t = t:gsub("<blockquote>(.-)</blockquote>", function(q)
         -- clean optional breaks
@@ -305,7 +320,7 @@ function TelegramExporter.send_to_discord(cfg, html_text)
     }
 end
 
-function TelegramExporter.compose_message(quote, meta_bundler)
+function TelegramExporter.compose_message(quote, meta_bundler, is_spoiler_override)
     local props = meta_bundler.raw or {}
     local filename = meta_bundler.file_path and meta_bundler.file_path:match("([^/]+)$") or "Unknown"
     
@@ -366,7 +381,16 @@ function TelegramExporter.compose_message(quote, meta_bundler)
         table.insert(lines, "")
     end
 
-    table.insert(lines, string.format("<blockquote>%s</blockquote>", TelegramExporter.clean_html(quote)))
+    local q_text = TelegramExporter.clean_html(quote)
+    local use_spoiler = SettingsManager.is_spoiler_enabled()
+    if is_spoiler_override ~= nil then
+        use_spoiler = is_spoiler_override
+    end
+    
+    if use_spoiler then
+        q_text = string.format('<span class="tg-spoiler">%s</span>', q_text)
+    end
+    table.insert(lines, string.format("<blockquote>%s</blockquote>", q_text))
     return table.concat(lines, "\n")
 end
 
@@ -719,7 +743,10 @@ local TelegramPlugin = DEPENDENCIES.container:extend{
 
 function TelegramPlugin:init()
     local ACTION_ID = "tg_export_action" 
+    local SPOILER_ACTION_ID = "tg_export_action_spoiler"
+
     if self.ui and self.ui.highlight then
+        -- Standard Button
         self.ui.highlight:addToHighlightDialog(ACTION_ID, function(ctx)
             return {
                 text = DEPENDENCIES.i18n("Errol: Send"), 
@@ -728,7 +755,25 @@ function TelegramPlugin:init()
                         local raw = ctx.selected_text.text
                         local clean = DEPENDENCIES.text_util.cleanupSelectedText(raw)
                         local data = SystemLayer.get_document_metadata(self.ui.document)
-                        local msg = TelegramExporter.compose_message(clean, data)
+                        local msg = TelegramExporter.compose_message(clean, data, nil)
+                        TelegramExporter.execute_delivery(msg, ctx)
+                    else
+                        if ctx.onClose then ctx:onClose() end
+                    end
+                end,
+            }
+        end)
+
+        -- Spoiler Button
+        self.ui.highlight:addToHighlightDialog(SPOILER_ACTION_ID, function(ctx)
+            return {
+                text = DEPENDENCIES.i18n("Errol: Spoiler"), 
+                callback = function()
+                    if ctx.selected_text and ctx.selected_text.text then
+                        local raw = ctx.selected_text.text
+                        local clean = DEPENDENCIES.text_util.cleanupSelectedText(raw)
+                        local data = SystemLayer.get_document_metadata(self.ui.document)
+                        local msg = TelegramExporter.compose_message(clean, data, true)
                         TelegramExporter.execute_delivery(msg, ctx)
                     else
                         if ctx.onClose then ctx:onClose() end
@@ -876,7 +921,17 @@ function TelegramPlugin:onAnnotationContextMenu(menu, item)
         text = DEPENDENCIES.i18n("Errol"),
         callback = function()
             local data = SystemLayer.get_document_metadata(self.ui.document)
-            local msg = TelegramExporter.compose_message(item.text, data)
+            -- Pass nil for override so it respects global setting
+            local msg = TelegramExporter.compose_message(item.text, data, nil)
+            TelegramExporter.execute_delivery(msg, nil)
+        end
+    }
+    menu:addItem{
+        text = DEPENDENCIES.i18n("Errol: Send as spoiler"),
+        callback = function()
+            local data = SystemLayer.get_document_metadata(self.ui.document)
+            -- Pass true to force spoiler
+            local msg = TelegramExporter.compose_message(item.text, data, true)
             TelegramExporter.execute_delivery(msg, nil)
         end
     }
@@ -1077,6 +1132,14 @@ function TelegramPlugin:onMainMenuItems()
             sub_item_table = {
                 settings_submenu,
                 autosend_item,
+                {
+                    text = DEPENDENCIES.i18n("Mark as Spoiler"),
+                    checked_func = function() return SettingsManager.is_spoiler_enabled() end,
+                    callback = function(tm)
+                        SettingsManager.set_spoiler_enabled(not SettingsManager.is_spoiler_enabled())
+                        if tm then tm:updateItems() end
+                    end,
+                },
                 {
                     text = DEPENDENCIES.i18n("Download Books (Telegram)"),
                     callback = function()

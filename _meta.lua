@@ -4,5 +4,5 @@ return {
     fullname = _("Errol - Telegram & Discord Highlight Sender"),
     description = _([[Sends highlights to Telegram & Discord, including metadata.]]),
     author = "agaragou",
-    version = "0.1",
+    version = "0.1.1",
 }
