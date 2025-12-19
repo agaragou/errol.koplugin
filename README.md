@@ -37,6 +37,8 @@ Designed for seamless reading, it supports **offline queuing**, automatic backgr
     *   Toggle platforms individually (Telegram/Discord).
     *   Choose your preferred date & time format.
     *   Set custom Wi-Fi check intervals for autosend.
+*   **Highlight Archive:** Browse, search, and resend any past highlight from the current book, directly from the menu.
+*   **Spoiler Mode:** Mark highlights as spoilers to hide them behind a blur (Telegram) or black bar (Discord).
 *   **Queue Manager:** View, manage, and manually flush your pending highlights queue directly from the device.
 
 ## Installation
@@ -94,11 +96,12 @@ return {
 Simply highlight text in any book.
 *   If **Online**: It sends immediately.
 *   If **Offline**: It saves to the queue.
-*   You can also select "Errol" from the highlight context menu if you don't want to use auto-send logic.
+*   **Spoiler**: Use the "Errol: Spoiler" button in the highlight menu to send as a spoiler.
 
 ### 2. Menu
 Go to **Tools (Wrench icon) -> Errol**:
 
+*   **Book Highlights:** (New!) Browse all highlights from the current book. Resend them or mark as spoiler.
 *   **Settings:**
     *   **Check wifi interval:** How often to check connection for autosend (default 15m).
     *   **Platforms:** Toggle Telegram / Discord on or off.

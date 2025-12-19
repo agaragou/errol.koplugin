@@ -148,11 +148,16 @@ end
 --------------------------------------------------------------------------------
 -- Cache Manager
 --------------------------------------------------------------------------------
-local CacheManager = {}
+local CacheManager = { _mem_cache = nil }
 
 function CacheManager.get_cache_dir()
-    local DataStorage = require("datastorage")
-    return DataStorage:getDataDir() .. "/cache/errol"
+    local sd = require("datastorage"):getSettingsDir()
+    local cache_dir = sd .. "/errol_cache"
+    local lfs = load_dep("lfs")
+    if not lfs.attributes(cache_dir) then
+        lfs.mkdir(cache_dir)
+    end
+    return cache_dir
 end
 
 function CacheManager.ensure_dir()
@@ -170,19 +175,30 @@ function CacheManager.get_file_path()
 end
 
 function CacheManager.load_queue()
+    if CacheManager._mem_cache then return CacheManager._mem_cache end
+    
     local json = load_dep("json")
     local path = CacheManager.get_file_path()
     local f = io.open(path, "r")
-    if not f then return {} end
+    if not f then 
+        CacheManager._mem_cache = {}
+        return CacheManager._mem_cache
+    end
     local content = f:read("*a")
     f:close()
-    if not content or content == "" then return {} end
     
-    local ok, res = pcall(json.decode, content)
-    return ok and res or {}
+    if not content or content == "" then 
+        CacheManager._mem_cache = {}
+    else
+        local ok, res = pcall(json.decode, content)
+        CacheManager._mem_cache = ok and res or {}
+    end
+    
+    return CacheManager._mem_cache
 end
 
 function CacheManager.save_queue(q)
+    CacheManager._mem_cache = q -- Update memory cache
     local json = load_dep("json")
     local path = CacheManager.get_file_path()
     local f = io.open(path, "w")
@@ -213,14 +229,34 @@ function CacheManager.remove_item(index)
 end
 
 function CacheManager.pop_all()
+    -- Copy current queue to return, then clear
     local q = CacheManager.load_queue()
+    local old_q = {}
+    for i,v in ipairs(q) do old_q[i] = v end
+    
     CacheManager.save_queue({})
-    return q
+    return old_q
 end
 
 function CacheManager.count()
     local q = CacheManager.load_queue()
     return #q
+end
+
+--------------------------------------------------------------------------------
+-- Highlights Browser
+--------------------------------------------------------------------------------
+local function makeHighlightPreview(text, page)
+    if not text then return "???" end
+    -- Strip HTML
+    local clean = text:gsub("<[^>]+>", "")
+    -- Collapse whitespace
+    clean = clean:gsub("%s+", " ")
+    
+    if page then
+        return string.format("[Page: %s] %s", tostring(page), clean)
+    end
+    return clean
 end
 
 --------------------------------------------------------------------------------
@@ -320,7 +356,13 @@ function TelegramExporter.send_to_discord(cfg, html_text)
     }
 end
 
-function TelegramExporter.compose_message(quote, meta_bundler, is_spoiler_override)
+function TelegramExporter.compose_message(quote, meta_bundler, options)
+    local opts = options or {}
+    -- Backwards compatibility: if options is boolean, treat as is_spoiler_override
+    if type(options) == "boolean" then
+        opts = { spoiler = options }
+    end
+
     local props = meta_bundler.raw or {}
     local filename = meta_bundler.file_path and meta_bundler.file_path:match("([^/]+)$") or "Unknown"
     
@@ -341,36 +383,67 @@ function TelegramExporter.compose_message(quote, meta_bundler, is_spoiler_overri
     local lines = {}
     table.insert(lines, "📖 <b>" .. TelegramExporter.clean_html(header_text) .. "</b>")
 
-    local reader = nil 
-    local ok, rui = pcall(require, "apps/reader/readerui")
-    if ok and rui then reader = rui.instance end
-
-    if reader and reader.toc and reader.view then
-        local pg = reader.view.state and reader.view.state.page
-        if pg then
-            local ok_toc, chap = pcall(function() return reader.toc:getTocTitleByPage(pg) end)
-            if ok_toc and chap and chap ~= "" then
-                table.insert(lines, "📑 Chapter: <b>" .. TelegramExporter.clean_html(chap) .. "</b>")
+    -- Chapter
+    local chap_txt
+    if opts.chapter then
+        chap_txt = opts.chapter
+    else
+        -- Try current reader state
+        local reader = nil 
+        local ok, rui = pcall(require, "apps/reader/readerui")
+        if ok and rui then reader = rui.instance end
+        if reader and reader.toc and reader.view then
+            local pg = reader.view.state and reader.view.state.page
+            if pg then
+                local ok_toc, c = pcall(function() return reader.toc:getTocTitleByPage(pg) end)
+                if ok_toc and c and c ~= "" then chap_txt = c end
             end
         end
     end
+    
+    if chap_txt and chap_txt ~= "" then
+        table.insert(lines, "📑 Chapter: <b>" .. TelegramExporter.clean_html(chap_txt) .. "</b>")
+    end
 
-    local cur = tonumber(meta_bundler.page_current)
+    -- Page
+    local cur = opts.page or tonumber(meta_bundler.page_current)
     local tot = tonumber(meta_bundler.pages_total)
     local page_str = "📄 Page: —"
+    
     if cur and tot then
         if tot > 0 then
+            -- If we have an override page, percentage might be approximate if not recalculated, 
+            -- but simple calc here is fine.
             local pct = math.floor((cur/tot)*100 + 0.5)
             page_str = string.format("📄 Page: %d of %d [%d%%]", cur, tot, pct)
         else
             page_str = string.format("📄 Page: %d of %d", cur, tot)
         end
+    elseif cur then
+         page_str = string.format("📄 Page: %d", cur)
     end
     table.insert(lines, page_str)
 
-    local time_fmt = SettingsManager.is_time_24h() and "%H:%M" or "%I:%M %p"
-    local date_fmt = SettingsManager.is_date_day_first() and "%d %b %Y" or "%b %d %Y"
-    table.insert(lines, "📆 " .. os.date(time_fmt .. " " .. date_fmt))
+    -- Date
+    local dt_str
+    if opts.datetime then
+         -- Parse "YYYY-MM-DD HH:MM:SS" (SQL format used by KOReader)
+         local Y, M, D, h, m, s = opts.datetime:match("(%d+)-(%d+)-(%d+) (%d+):(%d+):(%d+)")
+         if Y then
+             local time = os.time({year=Y, month=M, day=D, hour=h, min=m, sec=s})
+             local time_fmt = SettingsManager.is_time_24h() and "%H:%M" or "%I:%M %p"
+             local date_fmt = SettingsManager.is_date_day_first() and "%d %b %Y" or "%b %d %Y"
+             dt_str = os.date(time_fmt .. " " .. date_fmt, time)
+         else
+             dt_str = opts.datetime -- Fallback key
+         end
+    else
+        local time_fmt = SettingsManager.is_time_24h() and "%H:%M" or "%I:%M %p"
+        local date_fmt = SettingsManager.is_date_day_first() and "%d %b %Y" or "%b %d %Y"
+        dt_str = os.date(time_fmt .. " " .. date_fmt)
+    end
+    table.insert(lines, "📆 " .. dt_str)
+    
     table.insert(lines, "")
 
     local tags = {}
@@ -383,8 +456,8 @@ function TelegramExporter.compose_message(quote, meta_bundler, is_spoiler_overri
 
     local q_text = TelegramExporter.clean_html(quote)
     local use_spoiler = SettingsManager.is_spoiler_enabled()
-    if is_spoiler_override ~= nil then
-        use_spoiler = is_spoiler_override
+    if opts.spoiler ~= nil then
+        use_spoiler = opts.spoiler
     end
     
     if use_spoiler then
@@ -398,18 +471,20 @@ end
 -- Background Runner
 --------------------------------------------------------------------------------
 local BackgroundRunner = {
-    is_running = false
+    is_running = false,
+    session_id = 0
 }
 
-function BackgroundRunner.tick(callback_ref)
+function BackgroundRunner.tick(expected_sid)
+    -- Check stale
+    if expected_sid ~= BackgroundRunner.session_id then return end
+
     if CacheManager.count() == 0 then
         BackgroundRunner.is_running = false
         return
     end
 
     local http = load_dep("http")
-    local socket = load_dep("socket")
-
     -- Check Connectivity
     local _, c = http.request("http://clients3.google.com/generate_204")
     if c == 204 then
@@ -435,22 +510,27 @@ function BackgroundRunner.tick(callback_ref)
         BackgroundRunner.is_running = false
     else
         local mins = SettingsManager.get_interval()
-        DEPENDENCIES.ui:scheduleIn(mins * 60, BackgroundRunner.tick)
+        -- Schedule next tick with SAME session ID
+        DEPENDENCIES.ui:scheduleIn(mins * 60, function() BackgroundRunner.tick(expected_sid) end)
     end
 end
 
 function BackgroundRunner.start(immediate)
-    if BackgroundRunner.is_running then return end
+    -- Always increment session to invalidate any pending old ticks
+    BackgroundRunner.session_id = BackgroundRunner.session_id + 1
+    local my_sid = BackgroundRunner.session_id
+    
     BackgroundRunner.is_running = true
     local mins = SettingsManager.get_interval()
     local delay = immediate and 0 or (mins * 60)
-    DEPENDENCIES.ui:scheduleIn(delay, BackgroundRunner.tick)
+    
+    DEPENDENCIES.ui:scheduleIn(delay, function() BackgroundRunner.tick(my_sid) end)
 end
 
 function BackgroundRunner.stop()
     BackgroundRunner.is_running = false
-    -- specific schedule cancellation isn't easily exposed in KOReader API without saving task id, 
-    -- but setting flag to false will prevent 'tick' from executing logic.
+    -- Increment session ID to invalidate pending ticks
+    BackgroundRunner.session_id = BackgroundRunner.session_id + 1
 end
 
 --------------------------------------------------------------------------------
@@ -898,21 +978,213 @@ function TelegramPlugin:check_cache_on_startup()
         DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = string.format("Errol: Sending %d cached highlights...", count), duration = 3 })
     else
         -- Offline
+        -- ... logic handled in autosend check
         if SettingsManager.get_autosend_enabled() then
-            -- Autosend ON: Start runner + Notify
-            BackgroundRunner.start()
-            DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ 
-                text = string.format("Errol:\n%d cached highlights waiting for network.", count), 
+             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ 
+                text = string.format("Errol: Autosend ON.\n%d highlights will be sent when online.", count), 
                 duration = 5 
             })
+             -- Start runner to watch for connection
+             BackgroundRunner.start()
         else
-            -- Autosend OFF: Warn user
             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ 
                 text = string.format("Errol:\n%d cached highlights waiting.\nAutosend is OFF!", count), 
                 duration = 5 
             })
         end
     end
+end
+
+function TelegramPlugin:show_highlights_browser(callback_close)
+    local Device = require("device")
+    local Screen = require("device").screen
+    local Menu = require("ui/widget/menu")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local UIManager = require("ui/uimanager")
+
+    
+    -- 1. Fetch Bookmarks
+    local bookmarks = {}
+    
+    -- Option A1: ReaderAnnotation (Active memory - Primary Source)
+    -- This mimics ReaderHighlight behavior and is the most reliable source for the current session.
+    if self.ui and self.ui.annotation and self.ui.annotation.annotations then
+        bookmarks = self.ui.annotation.annotations
+    end
+
+    -- Option A2: DocSettings (Persisted memory - Fallback)
+    local count = 0
+    for _ in pairs(bookmarks) do count = count + 1 end
+    
+    if count == 0 and self.ui and self.ui.doc_settings and self.ui.doc_settings.data and self.ui.doc_settings.data.bookmarks then
+        bookmarks = self.ui.doc_settings.data.bookmarks
+    end
+
+    -- Option B: Disk (DocSettings API - Fallback)
+    -- ... (Previous disk logic omitted for brevity as memory sources should succeed now, 
+    -- but if you want to be extremely safe, we could keep the manual read. 
+    -- Given the user confirmed `ui.annotation` is the way, sticking to that is cleaner,
+    -- but I will keep the manual read logic if I can easily fit it, or simplify.)
+    
+    -- Let's keep the Manual Read as a last resort "Option C"
+    count = 0
+    for _ in pairs(bookmarks) do count = count + 1 end
+    
+    if count == 0 and self.ui and self.ui.document and self.ui.document.file then
+        local fpath = self.ui.document.file
+        local lfs = load_dep("lfs")
+        local sdr_path = fpath .. ".sdr"
+        local meta_path = sdr_path .. "/metadata.lua"
+        
+        if lfs.attributes(meta_path) then
+             local chunk = loadfile(meta_path)
+             if chunk then
+                 setfenv(chunk, {})
+                 local success, ret = pcall(chunk)
+                 if success and ret and ret.bookmarks then
+                     bookmarks = ret.bookmarks
+                 end
+             end
+        end
+    end
+    
+    -- Helper to resolve page number from cache or XPointer
+    local function getUiPage(item)
+        -- 1. Try pre-calculated 'pageno' (best)
+        if item.pageno and type(item.pageno) == "number" then
+            return item.pageno
+        end
+        
+        -- 2. Try 'page' (could be XPointer or string number)
+        local p_in = item.page
+        if type(p_in) == "number" then return p_in end
+        if type(p_in) == "string" and self.ui.document then
+            -- Try XPointer resolution if valid
+            if self.ui.document.getGeomPageFromXPointer then
+                local n = self.ui.document:getGeomPageFromXPointer(p_in)
+                if n then return n end
+            end
+            -- Fallback: try to match simple number in string
+            local num = tonumber(p_in)
+            if num then return num end
+        end
+        return 0 -- fallback for sort
+    end
+
+    -- 2. Filter Highlights and Sort
+    local highlights = {}
+    for _, item in pairs(bookmarks) do
+        if (item.text and item.text ~= "") or (item.type == "highlight") then
+             local h = {
+                 text = item.text or "[Image/Drawing]",
+                 page = item.page, -- Keep original for reference
+                 ui_page = getUiPage(item), -- Resolved number for UI/Sort
+                 datetime = item.datetime,
+                 chapter = item.chapter -- Store chapter too
+             }
+             if h.text ~= "" then
+                table.insert(highlights, h)
+             end
+        end
+    end
+    
+    -- Sort by page (numeric)
+    table.sort(highlights, function(a, b)
+        if a.ui_page ~= b.ui_page then return a.ui_page < b.ui_page end
+        return (a.datetime or "") < (b.datetime or "")
+    end)
+    
+    if #highlights == 0 then
+        DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "No highlights found in this book.", duration = 3 })
+        if callback_close then callback_close() end
+        return
+    end
+
+    -- 3. Build Menu Items
+    local menu_items = {}
+    for i, item in ipairs(highlights) do
+        local pg_label = (item.ui_page > 0) and item.ui_page or "?"
+        table.insert(menu_items, {
+            text = makeHighlightPreview(item.text, pg_label),
+            keep_menu_open = true,
+            callback = function(menu_instance)
+                -- Construct Full Preview Text (Ghost Message)
+                local data = SystemLayer.get_document_metadata(self.ui.document)
+                local opts = {
+                    page = item.ui_page,
+                    datetime = item.datetime,
+                    chapter = item.chapter
+                }
+                -- Generate what the message WOULD look like, for the preview
+                local preview_html = TelegramExporter.compose_message(item.text, data, opts)
+
+                -- Show Unified Action Dialog
+                local actions_dialog
+                actions_dialog = self:show_preview_dialog(preview_html, {
+                    {
+                        {
+                            text = "Cancel",
+                            callback = function() 
+                                actions_dialog:onClose()
+                            end,
+                        },
+                        {
+                            text = "Spoiler",
+                            callback = function()
+                                actions_dialog:onClose()
+                                -- Force spoiler override
+                                opts.spoiler = true 
+                                local msg = TelegramExporter.compose_message(item.text, data, opts)
+                                TelegramExporter.execute_delivery(msg, nil)
+                            end,
+                        },
+                         {
+                            text = "Send",
+                            callback = function()
+                                actions_dialog:onClose()
+                                local msg = TelegramExporter.compose_message(item.text, data, opts)
+                                TelegramExporter.execute_delivery(msg, nil)
+                            end,
+                        },
+                    }
+                })
+            end
+        })
+    end
+
+    -- 4. Show Menu (Queue Style)
+    local menu_container = CenterContainer:new{
+        dimen = Screen:getSize(),
+        covers_fullscreen = true,
+        ignore = "height",
+    }
+    
+    local browser_menu = Menu:new{
+        title = "Book Highlights",
+        item_table = menu_items,
+        width = Screen:getWidth(), -- Full width
+        show_parent = menu_container,
+        is_popout = true, -- Better input handling
+        is_enable_shortcut = false, -- Disable Q/W/E shortcuts
+        close_callback = function()
+            UIManager:close(menu_container)
+            if callback_close then callback_close() end
+        end,
+    }
+
+    -- Enable keep_menu_open support
+    function browser_menu:onMenuSelect(item)
+        if item.callback then item.callback(self) end
+        if not item.keep_menu_open and self.close_callback then
+            self.close_callback()
+        end
+        return true
+    end
+    
+    table.insert(menu_container, browser_menu)
+    UIManager:show(menu_container)
 end
 
 function TelegramPlugin:onAnnotationContextMenu(menu, item)
@@ -969,7 +1241,16 @@ function TelegramPlugin:_showIntervalDialog(callback)
                         local val = tonumber(input:getInputText())
                         if val and val > 0 then
                             SettingsManager.set_interval(val)
-                            DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Saved!", duration = 1 })
+                            
+                            -- Restart runner if enabled and active (or queue exists)
+                            if SettingsManager.get_autosend_enabled() and CacheManager.count() > 0 then
+                                BackgroundRunner.stop() -- Cancel old interval
+                                BackgroundRunner.start() -- Start new interval
+                                DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Interval saved & restarted!", duration = 1 })
+                            else
+                                DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Saved!", duration = 1 })
+                            end
+                            
                             if callback then callback() end
                         end
                         DEPENDENCIES.ui:close(input)
@@ -1146,6 +1427,14 @@ function TelegramPlugin:onMainMenuItems()
                         TelegramDownloader.download_updates()
                     end
                 },
+                {
+                    text = "Book Highlights", -- New Archive Item
+                    callback = function(touchmenu_instance)
+                         self:show_highlights_browser(function()
+                            if touchmenu_instance then touchmenu_instance:updateItems() end
+                        end)
+                    end
+                },
                 queue_item,
             }
         }
@@ -1158,12 +1447,66 @@ function TelegramExporter.get_preview(html, full)
     if not full then
         t = t:match("<blockquote>(.-)</blockquote>") or t
         t = t:gsub("<.->", "")
-        return #t > 50 and t:sub(1, 47) .. "..." or t
+        -- Use a safe large limit if we really must, but Menu handles it.
+        -- Removing manual byte truncation to fix UTF-8 display issues.
+        return t
     end
-    -- Full preview: strip icons and tags, keep newlines
-    t = t:gsub("📖 ", ""):gsub("📑 ", ""):gsub("📄 ", ""):gsub("📆 ", ""):gsub("🏷️.-[\r\n]+", "")
-    t = t:gsub("<br%s*/?>", "\n"):gsub("<.->", "")
-    return #t > 400 and t:sub(1, 397) .. "..." or t
+    -- Backward compatibility for raw text usage
+    return TelegramExporter.format_ui_text(html)
+end
+
+function TelegramExporter.format_ui_text(html)
+    if not html then return "" end
+    local t = html
+    
+    -- 1. Mark Spoilers (open only, text on new line)
+    t = t:gsub('<span class="tg%-spoiler">(.-)</span>', "[SPOILER]\n%1")
+    
+    -- 2. Strip Metadata Emojis/Headers from Preview
+    t = t:gsub("📖 ", "")
+    t = t:gsub("📑 ", "")
+    t = t:gsub("📄 ", "")
+    t = t:gsub("📆 ", "")
+    
+    -- 3. Strip Hashtag lines
+    t = t:gsub("🏷️.-[\r\n]+", "")
+    t = t:gsub("🏷️.-$", "")
+
+    -- 4. Newlines
+    t = t:gsub("<br%s*/?>", "\n")
+    t = t:gsub("<blockquote>", "") 
+    t = t:gsub("</blockquote>", "")
+    
+    -- 5. Strip remaining tags
+    t = t:gsub("<.->", "") 
+    
+    -- 6. Cleanup excessive whitespace and blank lines
+    -- Allow one blank line (2 \n) but collapse 3+ into 2
+    t = t:gsub("\n\n\n+", "\n\n") 
+    t = t:gsub("^%s+", ""):gsub("%s+$", "")
+    
+    return t
+end
+
+function TelegramPlugin:show_preview_dialog(text_content, buttons_def)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local UIManager = require("ui/uimanager")
+    
+    local clean_text = TelegramExporter.format_ui_text(text_content)
+    
+    -- Truncate for display if too long (approx 700 chars to fit most screens)
+    if #clean_text > 700 then
+        clean_text = clean_text:sub(1, 700) .. "...\n(Display truncated, full text will be sent)"
+    end
+    
+    local d
+    d = ButtonDialog:new{
+        title = clean_text,
+        title_align = "left", -- Better for long text reading
+        buttons = buttons_def
+    }
+    UIManager:show(d)
+    return d
 end
 
 function TelegramPlugin:show_queue_manager(on_close_callback)
@@ -1200,20 +1543,29 @@ function TelegramPlugin:show_queue_manager(on_close_callback)
             text = string.format("%d. %s", i, TelegramExporter.get_preview(item.text)),
             keep_menu_open = true,
             callback = function()
-                DEPENDENCIES.ui:show(DEPENDENCIES.confirmbox:new{
-                    text = TelegramExporter.get_preview(item.text, true),
-                    paragraph_width = Screen:getWidth() * 0.8,
-                    ok_text = DEPENDENCIES.i18n("Remove"),
-                    cancel_text = DEPENDENCIES.i18n("Cancel"),
-                    ok_callback = function()
-                        if CacheManager.remove_item(i) then
-                             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Deleted", duration = 1 })
-                             DEPENDENCIES.ui:close(menu_container)
-                             self:show_queue_manager(on_close_callback)
-                        else
-                             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Error deleting", duration = 2 })
-                        end
-                    end
+                local actions_dialog
+                actions_dialog = self:show_preview_dialog(item.text, {
+                    {
+                        {
+                            text = DEPENDENCIES.i18n("Cancel"),
+                            callback = function()
+                                actions_dialog:onClose()
+                            end
+                        },
+                        {
+                            text = DEPENDENCIES.i18n("Remove"),
+                            callback = function()
+                                if CacheManager.remove_item(i) then
+                                     DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Deleted", duration = 1 })
+                                     actions_dialog:onClose()
+                                     DEPENDENCIES.ui:close(menu_container)
+                                     self:show_queue_manager(on_close_callback)
+                                else
+                                     DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Error deleting", duration = 2 })
+                                end
+                            end
+                        }
+                    }
                 })
             end
         })
@@ -1226,6 +1578,7 @@ function TelegramPlugin:show_queue_manager(on_close_callback)
         width = Screen:getWidth(),
         show_parent = menu_container,
         is_popout = true,
+        is_enable_shortcut = false, -- Disable Q/W/E shortcuts
         close_callback = function() 
             DEPENDENCIES.ui:close(menu_container) 
             if on_close_callback then on_close_callback() end
