@@ -29,15 +29,15 @@ Designed for seamless reading, it supports **offline queuing**, automatic backgr
 
 ## Features
 
-*   **Multi-Platform Support:** Send highlights to a Telegram Bot, a Discord Channel (via Webhook), or both.
+*   **Multi-Platform Support:** Send highlights to a Telegram Bot, a Discord Channel (via Webhooks with **Rich Embeds**), or both.
 *   **Offline First:** Reading on the subway or in flight mode? Errol queues your highlights and automatically sends them when you're back online.
-*   **Rich Metadata:** Includes book title, chapter, page number, and reading progress with every quote.
+*   **Rich Metadata:** Includes book title, chapter, page number (supports **Stable/Print page numbers**), and reading progress with every quote.
 *   **Book Downloader:** (Telegram Only) Send book files to your bot, and download them directly to your device via the Errol menu.
 *   **Customizable:**
     *   Toggle platforms individually (Telegram/Discord).
     *   Choose your preferred date & time format.
     *   Set custom Wi-Fi check intervals for autosend.
-*   **Highlight Archive:** Browse, search, and resend any past highlight from the current book, directly from the menu.
+*   **Highlight Archive & Navigation:** Browse all past highlights and use **"Go to Page"** to instantly jump to that location in the book (with "Go Back" history support).
 *   **Spoiler Mode:** Mark highlights as spoilers to hide them behind a blur (Telegram) or black bar (Discord).
 *   **Queue Manager:** View, manage, and manually flush your pending highlights queue directly from the device.
 

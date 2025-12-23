@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3] - 2025-12-23 - Discord Embeds & Architecture Overhaul
+### Added
+- **Discord Rich Embeds:** Highlights sent to Discord now use beautiful "Embed" cards with gold side-bars, containing formatted quotes, chapter info, page numbers, and dates in the footer.
+- **Improved Preview UI:** The text preview in Queue and Archive menus is now cleaner, stripping internal IDs/Tags while preserving formatting.
+- **Network Helper:** Complete modernization of the networking layer for better stability and error handling.
+- **Book-like Formatting:** Highlights are now formatted with proper paragraph indentation (using Em Spaces) for a more pleasant reading experience. Note: Rich text formatting (bold/italic) is currently stripped to ensure compatibility.
+- **Highlight Navigation:**
+    - **Go to Page:** Added a button to "Go to Page" for any highlight in the Archive or Queue.
+    - **History Support:** Jumping to a highlight saves your previous position, so you can easily "Go Back" (swipe or menu) to continue reading where you left off.
+- **Stable Page Numbers:** Automatically detects if "Stable Page Numbers" are enabled in KOReader and displays the print page number (e.g., `📄 Print Page: 405 of 480 [84%]`) alongside the percentage.
+
+### Changed
+- **Codebase Refactoring:** Massive cleanup of `main.lua`.
+    - Centralized dependencies and network calls.
+    - Simplified Settings Manager using metaprogramming patterns.
+    - Unified logic for background sender and manual sender (standardized message composition).
+- **Telegram Downloader:** Rewritten to use the new Network helper, improving reliability and error reporting when fetching books.
+- **Performance:** Optimized memory usage by lazy-loading heavy libraries (socket, json, lfs) only when needed.
+
 ## [0.2] - 2025-12-20 - Archive, Spoilers & Stability
 ### Added
 - **Highlight Archive:** Browse all highlights (default as well) in the current book!

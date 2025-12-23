@@ -6,19 +6,16 @@ local DEPENDENCIES = {
     text_util = require("util"),
     i18n = require("gettext"),
     logger = require("logger"),
-    -- Lazy loaded modules placeholder
-    socket = nil, 
-    http = nil,
-    json = nil,
-    lfs = nil,
+    -- Modules loaded on demand: socket, http, json, lfs
 }
 
 local function load_dep(name)
     if DEPENDENCIES[name] then return DEPENDENCIES[name] end
     if name == "socket" then DEPENDENCIES.socket = require("socket") end
     if name == "http" then 
-        DEPENDENCIES.http = require("socket.http") 
-        DEPENDENCIES.http.TIMEOUT = 2
+        local http = require("socket.http")
+        http.TIMEOUT = 5 
+        DEPENDENCIES.http = http
     end
     if name == "json" then DEPENDENCIES.json = require("json") end
     if name == "lfs" then DEPENDENCIES.lfs = require("libs/libkoreader-lfs") end
@@ -26,124 +23,92 @@ local function load_dep(name)
 end
 
 --------------------------------------------------------------------------------
--- Settings Manager
+-- Network Helper
+--------------------------------------------------------------------------------
+local Network = {}
+
+function Network.json_request(url, method, payload_tbl)
+    local http = load_dep("http")
+    local json = load_dep("json")
+    local ltn12 = require("ltn12")
+    
+    local resp_body = {}
+    local req_params = {
+        url = url,
+        method = method or "GET",
+        sink = ltn12.sink.table(resp_body)
+    }
+
+    if payload_tbl then
+        local json_str = json.encode(payload_tbl)
+        req_params.headers = {
+            ["Content-Type"] = "application/json",
+            ["Content-Length"] = #json_str
+        }
+        req_params.source = ltn12.source.string(json_str)
+        req_params.method = "POST" 
+    end
+
+    local _, code = http.request(req_params)
+    local body_str = table.concat(resp_body)
+    
+    if (code == 200 or code == 204) and body_str ~= "" then
+        local ok, res = pcall(json.decode, body_str)
+        if ok then return res, code end
+    end
+    return body_str, code
+end
+
+function Network.get(url)
+    local http = load_dep("http")
+    return http.request(url)
+end
+
+--------------------------------------------------------------------------------
+-- Settings Manager (Refactored)
 --------------------------------------------------------------------------------
 local SettingsManager = {}
+local G = G_reader_settings
 
-function SettingsManager.get_global_settings()
-    return G_reader_settings
+local function get_s(k, def)
+    if G and G:has(k) then return G:readSetting(k) end
+    return def
 end
+local function get_b(k, def)
+    if G and G:has(k) then return G:isTrue(k) end
+    return def
+end
+local function set_s(k, v) if G then G:saveSetting(k, v) end end
 
-function SettingsManager.get_autosend_enabled()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_autosend_enabled") then
-        return s:isTrue("errol_autosend_enabled")
-    end
-    return false
-end
+-- Autosend
+function SettingsManager.get_autosend_enabled() return get_b("errol_autosend_enabled", false) end
+function SettingsManager.set_autosend_enabled(v) set_s("errol_autosend_enabled", v) end
 
-function SettingsManager.set_autosend_enabled(val)
-    local s = SettingsManager.get_global_settings()
-    if s then
-        s:saveSetting("errol_autosend_enabled", val)
-    end
-end
+-- Interval
+function SettingsManager.get_interval() return tonumber(get_s("errol_check_interval", 15)) end
+function SettingsManager.set_interval(v) set_s("errol_check_interval", tonumber(v)) end
 
-function SettingsManager.get_interval()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_check_interval") then
-        local v = tonumber(s:readSetting("errol_check_interval"))
-        if v and v > 0 then return v end
-    end
-    return 15
-end
+-- Download Dir
+function SettingsManager.get_download_dir() return get_s("errol_download_dir", require("device").home_dir) end
+function SettingsManager.set_download_dir(v) set_s("errol_download_dir", v) end
 
-function SettingsManager.set_interval(val)
-    local s = SettingsManager.get_global_settings()
-    if s then
-        s:saveSetting("errol_check_interval", tonumber(val))
-    end
-end
+-- Platforms
+function SettingsManager.is_telegram_enabled() return get_b("errol_telegram_enabled", true) end
+function SettingsManager.set_telegram_enabled(v) set_s("errol_telegram_enabled", v) end
+function SettingsManager.is_discord_enabled() return get_b("errol_discord_enabled", true) end
+function SettingsManager.set_discord_enabled(v) set_s("errol_discord_enabled", v) end
 
-function SettingsManager.get_download_dir()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_download_dir") then
-        return s:readSetting("errol_download_dir")
-    end
-    return require("device").home_dir -- Fallback to home
-end
+-- Formatting
+function SettingsManager.is_time_24h() return get_b("errol_time_24h", true) end
+function SettingsManager.set_time_24h(v) set_s("errol_time_24h", v) end
+function SettingsManager.is_date_day_first() return get_b("errol_date_day_first", true) end
+function SettingsManager.set_date_day_first(v) set_s("errol_date_day_first", v) end
+function SettingsManager.is_spoiler_enabled() return get_b("errol_spoiler_enabled", false) end
+function SettingsManager.set_spoiler_enabled(v) set_s("errol_spoiler_enabled", v) end
 
-function SettingsManager.set_download_dir(val)
-    local s = SettingsManager.get_global_settings()
-    if s then
-        s:saveSetting("errol_download_dir", val)
-    end
-end
-
-function SettingsManager.is_telegram_enabled()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_telegram_enabled") then
-        return s:isTrue("errol_telegram_enabled")
-    end
-    return true -- Default True
-end
-
-function SettingsManager.set_telegram_enabled(val)
-    local s = SettingsManager.get_global_settings()
-    if s then s:saveSetting("errol_telegram_enabled", val) end
-end
-
-function SettingsManager.is_discord_enabled()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_discord_enabled") then
-        return s:isTrue("errol_discord_enabled")
-    end
-    return true -- Default True
-end
-
-function SettingsManager.set_discord_enabled(val)
-    local s = SettingsManager.get_global_settings()
-    if s then s:saveSetting("errol_discord_enabled", val) end
-end
-
-function SettingsManager.is_time_24h()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_time_24h") then
-        return s:isTrue("errol_time_24h")
-    end
-    return true -- Default 24h
-end
-
-function SettingsManager.set_time_24h(val)
-    local s = SettingsManager.get_global_settings()
-    if s then s:saveSetting("errol_time_24h", val) end
-end
-
-function SettingsManager.is_date_day_first()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_date_day_first") then
-        return s:isTrue("errol_date_day_first")
-    end
-    return true -- Default DD MMM YYYY
-end
-
-function SettingsManager.set_date_day_first(val)
-    local s = SettingsManager.get_global_settings()
-    if s then s:saveSetting("errol_date_day_first", val) end
-end
-
-function SettingsManager.is_spoiler_enabled()
-    local s = SettingsManager.get_global_settings()
-    if s and s:has("errol_spoiler_enabled") then
-        return s:isTrue("errol_spoiler_enabled")
-    end
-    return false -- Default False
-end
-
-function SettingsManager.set_spoiler_enabled(val)
-    local s = SettingsManager.get_global_settings()
-    if s then s:saveSetting("errol_spoiler_enabled", val) end
-end
+-- State
+function SettingsManager.get_last_update_id() return tonumber(get_s("errol_last_update_id", 0)) end
+function SettingsManager.set_last_update_id(v) set_s("errol_last_update_id", tonumber(v)) end
 
 --------------------------------------------------------------------------------
 -- Cache Manager
@@ -282,30 +247,14 @@ end
 --------------------------------------------------------------------------------
 local TelegramExporter = {}
 
-function TelegramExporter.safe_encode(str)
-    if not str then return "" end
-    str = string.gsub(str, "\n", "\r\n")
-    str = string.gsub(str, "([^%w _%%%-%.~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    return string.gsub(str, " ", "%%20")
-end
-
 function TelegramExporter.clean_html(str)
     if not str then return "" end
-    str = string.gsub(str, "&", "&amp;")
-    str = string.gsub(str, "<", "&lt;")
-    str = string.gsub(str, ">", "&gt;")
-    return str
+    return str:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
 end
 
 function TelegramExporter.format_tag(str)
     if not str or str == "" then return nil end
-    local s = tostring(str)
-    s = s:gsub("%s+", "_")
-    -- Replace dots with empty string or underscore to prevent tag breakage
-    s = s:gsub("[%.#&<>:]", "")
-    return s
+    return tostring(str):gsub("%s+", "_"):gsub("[%.#&<>:]", "")
 end
 
 function TelegramExporter.html_to_markdown(text)
@@ -333,28 +282,40 @@ function TelegramExporter.html_to_markdown(text)
     return t
 end
 
-function TelegramExporter.send_to_discord(cfg, html_text)
+function TelegramExporter.send_to_discord(cfg, payload)
     if not cfg or not cfg.discord or not cfg.discord.webhook_url then return end
-    local md_text = TelegramExporter.html_to_markdown(html_text)
     
-    local json = load_dep("json")
-    local http = load_dep("http")
-    local ltn12 = require("ltn12")
+    local discord_json = {}
+    
+    if type(payload) == "table" and payload.meta then
+        -- V2: Structured
+        local meta = payload.meta
+        local q_clean = (meta.quote_clean or meta.quote or ""):gsub('<span class="tg%-spoiler">', "||"):gsub('</span>', "||")
+        
+        local footer_parts = {}
+        if meta.chapter_clean and meta.chapter_clean ~= "" then table.insert(footer_parts, "📑 " .. meta.chapter_clean) end
+        if meta.page_label then table.insert(footer_parts, meta.page_label) end
+        if meta.date_label then table.insert(footer_parts, meta.date_label) end
+        
+        discord_json = {
+            embeds = {{
+                title = string.format("%s — %s", meta.title or "Unknown", meta.author or "Unknown"),
+                description = q_clean,
+                color = 16766720, -- Gold
+                footer = { text = table.concat(footer_parts, " • ") }
+            }}
+        }
+    else
+        -- V1: Legacy
+        local md_text = TelegramExporter.html_to_markdown(payload)
+                       :gsub("🏷️.-[\r\n]+", "")
+                       :gsub("🏷️.-$", "")
+        discord_json = { content = md_text }
+    end
 
-    local payload = json.encode({ content = md_text })
-    local resp = {}
-
-    http.request{
-        url = cfg.discord.webhook_url,
-        method = "POST",
-        headers = {
-            ["Content-Type"] = "application/json",
-            ["Content-Length"] = #payload
-        },
-        source = ltn12.source.string(payload),
-        sink = ltn12.sink.table(resp)
-    }
+    Network.json_request(cfg.discord.webhook_url, "POST", discord_json)
 end
+
 
 function TelegramExporter.compose_message(quote, meta_bundler, options)
     local opts = options or {}
@@ -409,8 +370,24 @@ function TelegramExporter.compose_message(quote, meta_bundler, options)
     local cur = opts.page or tonumber(meta_bundler.page_current)
     local tot = tonumber(meta_bundler.pages_total)
     local page_str = "📄 Page: —"
-    
-    if cur and tot then
+
+    -- Stable Page Logic (Override if available)
+    if meta_bundler.page_label_stable then
+         local stable_cur = meta_bundler.page_label_stable
+         local stable_tot = meta_bundler.page_label_total_stable
+         
+         if stable_tot then
+             page_str = string.format("📄 Print Page: %s of %s", stable_cur, stable_tot)
+         else
+             page_str = string.format("📄 Print Page: %s", stable_cur)
+         end
+         
+         -- Append percentage if available (using screen/absolute pages)
+         if cur and tot and tot > 0 then
+             local pct = math.floor((cur/tot)*100 + 0.5)
+             page_str = page_str .. string.format(" [%d%%]", pct)
+         end
+    elseif cur and tot then
         if tot > 0 then
             -- If we have an override page, percentage might be approximate if not recalculated, 
             -- but simple calc here is fine.
@@ -422,6 +399,7 @@ function TelegramExporter.compose_message(quote, meta_bundler, options)
     elseif cur then
          page_str = string.format("📄 Page: %d", cur)
     end
+    
     table.insert(lines, page_str)
 
     -- Date
@@ -455,6 +433,11 @@ function TelegramExporter.compose_message(quote, meta_bundler, options)
     end
 
     local q_text = TelegramExporter.clean_html(quote)
+    
+    -- "Book-like" formatting: Add indentation (Em Space U+2003) to paragraphs
+    local em_space = "\226\128\131"
+    q_text = em_space .. q_text:gsub("\n", "\n" .. em_space)
+    
     local use_spoiler = SettingsManager.is_spoiler_enabled()
     if opts.spoiler ~= nil then
         use_spoiler = opts.spoiler
@@ -463,8 +446,38 @@ function TelegramExporter.compose_message(quote, meta_bundler, options)
     if use_spoiler then
         q_text = string.format('<span class="tg-spoiler">%s</span>', q_text)
     end
-    table.insert(lines, string.format("<blockquote>%s</blockquote>", q_text))
-    return table.concat(lines, "\n")
+    -- Add extra newline at the end for visual separation in some clients
+    table.insert(lines, string.format("<blockquote>%s\n</blockquote>", q_text))
+    
+    local final_html = table.concat(lines, "\n")
+    
+    return {
+        html = final_html,
+        meta = {
+            title = title,
+            author = author, -- Raw author string or table
+            quote_clean = q_text, -- Cleaned quote with indentation
+            chapter_clean = chap_txt, -- Clean chapter name
+            page_label = page_str, -- Full page string "Page: 25 of ..."
+            date_label = "📆 " .. dt_str, -- Date string
+            tags = tags, -- table of tags
+            -- Navigation Data
+            page_num = cur,
+            source_path = meta_bundler.file_path, 
+        }
+    }
+end
+
+function TelegramExporter.send_telegram(cfg, text)
+    if not cfg or not cfg.telegram or not cfg.telegram.token or not cfg.telegram.chat_id then return false, "Config missing" end
+    local url = string.format("https://api.telegram.org/bot%s/sendMessage", cfg.telegram.token)
+    local body = {
+        chat_id = cfg.telegram.chat_id,
+        parse_mode = "HTML",
+        text = text
+    }
+    local res, code = Network.json_request(url, "POST", body)
+    return (code == 200 and res and res.ok), code
 end
 
 --------------------------------------------------------------------------------
@@ -476,7 +489,6 @@ local BackgroundRunner = {
 }
 
 function BackgroundRunner.tick(expected_sid)
-    -- Check stale
     if expected_sid ~= BackgroundRunner.session_id then return end
 
     if CacheManager.count() == 0 then
@@ -484,33 +496,28 @@ function BackgroundRunner.tick(expected_sid)
         return
     end
 
-    local http = load_dep("http")
     -- Check Connectivity
-    local _, c = http.request("http://clients3.google.com/generate_204")
+    local _, c = Network.get("http://clients3.google.com/generate_204")
     if c == 204 then
         -- Online! Flush
         local queue = CacheManager.pop_all()
         local cfg = ConfigProvider.get_settings()
         
         for _, item in ipairs(queue) do
-            if SettingsManager.is_telegram_enabled() then
-                local url = string.format(
-                    "https://api.telegram.org/bot%s/sendMessage?chat_id=%s&parse_mode=HTML&text=%s",
-                    cfg.telegram.token, cfg.telegram.chat_id, TelegramExporter.safe_encode(item.text)
-                )
-                http.request(url)
-            end
+            local payload = item.text
+            local msg_text = type(payload) == "table" and payload.html or payload
             
-            -- Try Discord
-            if SettingsManager.is_discord_enabled() and cfg.discord and cfg.discord.webhook_url then
-                 TelegramExporter.send_to_discord(cfg, item.text)
+            if SettingsManager.is_telegram_enabled() then
+                TelegramExporter.send_telegram(cfg, msg_text)
+            end
+            if SettingsManager.is_discord_enabled() then
+                 TelegramExporter.send_to_discord(cfg, payload)
             end
         end
         DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = DEPENDENCIES.i18n("Sent cached Errol highlights!"), duration = 3 })
         BackgroundRunner.is_running = false
     else
         local mins = SettingsManager.get_interval()
-        -- Schedule next tick with SAME session ID
         DEPENDENCIES.ui:scheduleIn(mins * 60, function() BackgroundRunner.tick(expected_sid) end)
     end
 end
@@ -536,33 +543,26 @@ end
 --------------------------------------------------------------------------------
 -- Main Action
 --------------------------------------------------------------------------------
-function TelegramExporter.execute_delivery(text, ui_context)
+function TelegramExporter.execute_delivery(payload, ui_context)
     local cfg = ConfigProvider.get_settings()
-    local http = load_dep("http")
+    -- Resolve payload (string or table)
+    local msg_text = type(payload) == "table" and payload.html or payload
 
     local function attempt_send()
          local sent_any = false
          
          if SettingsManager.is_telegram_enabled() then
-             if not cfg.telegram or not cfg.telegram.token or not cfg.telegram.chat_id then
-                 DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Telegram config missing", duration = 3 })
+             local ok, err = TelegramExporter.send_telegram(cfg, msg_text)
+             if ok then
+                  sent_any = true
+                  DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Sent to Telegram!", duration = 1 })
              else
-                 local url = string.format(
-                     "https://api.telegram.org/bot%s/sendMessage?chat_id=%s&parse_mode=HTML&text=%s",
-                     cfg.telegram.token, cfg.telegram.chat_id, TelegramExporter.safe_encode(text)
-                 )
-                 local _, code = http.request(url)
-                 if code == 200 then
-                      sent_any = true
-                      DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Sent to Telegram!", duration = 1 })
-                 else
-                      DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Telegram Error: " .. tostring(code), duration = 3 })
-                 end
+                  DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Telegram Error: " .. tostring(err), duration = 3 })
              end
          end
          
          if SettingsManager.is_discord_enabled() and cfg.discord and cfg.discord.webhook_url then
-             TelegramExporter.send_to_discord(cfg, text)
+             TelegramExporter.send_to_discord(cfg, payload)
              sent_any = true
              DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Sent to Discord!", duration = 1 })
          end
@@ -574,7 +574,7 @@ function TelegramExporter.execute_delivery(text, ui_context)
     end
 
     local function queue_and_autosend()
-        CacheManager.push(text)
+        CacheManager.push(payload) 
         BackgroundRunner.start()
         DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ 
             text = DEPENDENCIES.i18n("Saved to cache. Will send when online."), 
@@ -585,13 +585,13 @@ function TelegramExporter.execute_delivery(text, ui_context)
     end
 
     local function runner_logic()
-         local _, c = http.request("http://clients3.google.com/generate_204")
+         local _, c = Network.get("http://clients3.google.com/generate_204")
          if c == 204 then
              -- Online
              local count = CacheManager.count()
              if count > 0 then
                  -- If we have backlog, queue this one too and flush everything
-                 CacheManager.push(text)
+                 CacheManager.push(payload)
                  BackgroundRunner.stop() -- Ensure we interrupt any existing wait
                  BackgroundRunner.start(true) -- Immediate start
                  
@@ -618,7 +618,7 @@ function TelegramExporter.execute_delivery(text, ui_context)
                  end
 
                  local function on_wifi_connected()
-                      local _, c2 = http.request("http://clients3.google.com/generate_204")
+                      local _, c2 = Network.get("http://clients3.google.com/generate_204")
                       if c2 == 204 then
                           attempt_send()
                       else
@@ -649,7 +649,7 @@ function TelegramExporter.execute_delivery(text, ui_context)
                              ok_callback = function()
                                  SettingsManager.set_autosend_enabled(true)
                                  -- Update menu checks
-                                 if touchmenu_instance then touchmenu_instance:updateItems() end
+                                 -- (We don't have reference to touchmenu_instance here easily, skip update or assume it updates on next open)
                                  queue_and_autosend()
                              end,
                              cancel_callback = function()
@@ -672,10 +672,8 @@ local TelegramDownloader = {}
 
 function TelegramDownloader.download_updates(callback)
     local cfg = ConfigProvider.get_settings()
-    local http = load_dep("http")
-    local json = load_dep("json")
-    local lfs = load_dep("lfs")
     local download_dir = SettingsManager.get_download_dir()
+    local lfs = load_dep("lfs")
 
     if not lfs.attributes(download_dir, "mode") then
         DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Invalid download directory!", duration = 3 })
@@ -684,24 +682,20 @@ function TelegramDownloader.download_updates(callback)
 
     local total_downloaded = 0
     local processed_any = false
-    local max_iterations = 5 -- Safety limit to prevent infinite loops
-    local offset = 0
+    local max_iterations = 5 
+    local offset = SettingsManager.get_last_update_id() + 1
     local loop_count = 0
 
     local function fetch_batch()
         loop_count = loop_count + 1
-        -- Naive progress indicator
         if loop_count == 1 then
-             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Checking for books...", duration = 1 })
+             --DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Checking for books...", duration = 1 })
         end
 
         local url = string.format("https://api.telegram.org/bot%s/getUpdates?limit=10&offset=%d", cfg.telegram.token, offset)
-        local body, code = http.request(url)
-        
-        if code ~= 200 then return false end
-        
-        local ok, res = pcall(json.decode, body)
-        if not (ok and res and res.ok and res.result) then return false end
+        local res, code = Network.json_request(url)
+
+        if code ~= 200 or not (res and res.ok and res.result) then return false end
         
         local updates = res.result
         if #updates == 0 then return false end
@@ -710,76 +704,63 @@ function TelegramDownloader.download_updates(callback)
         local docs = {}
 
         for _, update in ipairs(updates) do
-            if update.update_id then
-                max_id = update.update_id
-            end
-
-            -- Validate Chat ID and Doc existence
+            if update.update_id then max_id = update.update_id end
+            
+            -- Filter for Documents in valid Chat
             if update.message and update.message.chat and tostring(update.message.chat.id) == tostring(cfg.telegram.chat_id) then
                 if update.message.document then
                     table.insert(docs, {
-                        doc = update.message.document,
-                        message_id = update.message.message_id,
-                        chat_id = update.message.chat.id
+                        file_id = update.message.document.file_id,
+                        file_name = update.message.document.file_name,
                     })
                 end
-            elseif update.message and update.message.chat then
-                 -- Log unauthorized or ignored message?
-                 -- For now, we simply ignore it, but we MUST acknowledge it via offset 
-                 -- effectively "deleting" it from the queue for this bot.
             end
         end
 
-        -- Update offset for next batch
         if max_id > 0 then
             offset = max_id + 1
             processed_any = true
+            -- Update Smart Sync state
+            if max_id > SettingsManager.get_last_update_id() then
+                SettingsManager.set_last_update_id(max_id)
+            end
         end
         
-        -- Download found docs in this batch
-        for i, item in ipairs(docs) do
-             local doc = item.doc
-             local file_id = doc.file_id
-             local file_name = doc.file_name or ("doc_" .. file_id)
-             local target_path = download_dir .. "/" .. file_name
-             
+        -- Download Cycle
+        for _, item in ipairs(docs) do
+             local fname = item.file_name or ("doc_" .. item.file_id)
+             local target_path = download_dir .. "/" .. fname
+             -- Skip if exists (deduplication)
              if not lfs.attributes(target_path) then
-                 local path_url = string.format("https://api.telegram.org/bot%s/getFile?file_id=%s", cfg.telegram.token, file_id)
-                 local path_body, path_code = http.request(path_url)
+                 local path_url = string.format("https://api.telegram.org/bot%s/getFile?file_id=%s", cfg.telegram.token, item.file_id)
+                 local pres, pcode = Network.json_request(path_url)
                  
-                 if path_code == 200 then
-                      local pok, pres = pcall(json.decode, path_body)
-                      if pok and pres and pres.ok and pres.result and pres.result.file_path then
-                          local dl_url = string.format("https://api.telegram.org/file/bot%s/%s", cfg.telegram.token, pres.result.file_path)
-                          local file_content, dl_code = http.request(dl_url)
-                          if dl_code == 200 and file_content then
-                              local f = io.open(target_path, "wb")
-                              if f then
-                                  f:write(file_content)
-                                  f:close()
-                                  total_downloaded = total_downloaded + 1
-                                  
-                                  -- Delete processed message from chat
-                                  local del_url = string.format("https://api.telegram.org/bot%s/deleteMessage?chat_id=%s&message_id=%s", cfg.telegram.token, item.chat_id, item.message_id)
-                                  http.request(del_url)
-                              end
+                 if pcode == 200 and pres and pres.ok and pres.result.file_path then
+                      local dl_url = string.format("https://api.telegram.org/file/bot%s/%s", cfg.telegram.token, pres.result.file_path)
+                      local file_content, dl_code = Network.get(dl_url)
+                      
+                      if dl_code == 200 and file_content then
+                          local f = io.open(target_path, "wb")
+                          if f then
+                              f:write(file_content)
+                              f:close()
+                              total_downloaded = total_downloaded + 1
                           end
                       end
                  end
              end
         end
 
-        return true -- Continue loop
+        return true -- Continue if we found updates
     end
 
-    -- Run Loop
     while loop_count < max_iterations do
         if not fetch_batch() then break end
     end
     
-    -- Final confirmation request to clear server queue
+    -- Clear queue on server (acknowledge offset)
     if processed_any and offset > 0 then
-        http.request(string.format("https://api.telegram.org/bot%s/getUpdates?offset=%d&limit=1&timeout=0", cfg.telegram.token, offset))
+        Network.get(string.format("https://api.telegram.org/bot%s/getUpdates?offset=%d&limit=1&timeout=0", cfg.telegram.token, offset))
     end
 
     if total_downloaded > 0 then
@@ -799,7 +780,7 @@ end
 --------------------------------------------------------------------------------
 local SystemLayer = {}
 
-function SystemLayer.get_document_metadata(doc)
+function SystemLayer.get_document_metadata(doc, ui_instance)
     local m = {}
     if not doc then return m end
     local rp = nil
@@ -813,6 +794,22 @@ function SystemLayer.get_document_metadata(doc)
     m.file_path = doc.file
     if doc.getPageCount then m.pages_total = doc:getPageCount() end
     if doc.getCurrentPage then m.page_current = doc:getCurrentPage() end
+    
+    -- Stable Page Numbers (PageMap)
+    if ui_instance and ui_instance.pagemap then
+         -- Check if enabled (settings + availability)
+         if ui_instance.pagemap.wantsPageLabels and ui_instance.pagemap:wantsPageLabels() then
+             local label = ui_instance.pagemap:getCurrentPageLabel()
+             if label then 
+                 m.page_label_stable = label 
+                 -- Also allow getting the "Total" (Last Page Label)
+                 if ui_instance.pagemap.getLastPageLabel then
+                     m.page_label_total_stable = ui_instance.pagemap:getLastPageLabel()
+                 end
+             end
+         end
+    end
+    
     return m
 end
 
@@ -834,7 +831,7 @@ function TelegramPlugin:init()
                     if ctx.selected_text and ctx.selected_text.text then
                         local raw = ctx.selected_text.text
                         local clean = DEPENDENCIES.text_util.cleanupSelectedText(raw)
-                        local data = SystemLayer.get_document_metadata(self.ui.document)
+                        local data = SystemLayer.get_document_metadata(self.ui.document, self.ui)
                         local msg = TelegramExporter.compose_message(clean, data, nil)
                         TelegramExporter.execute_delivery(msg, ctx)
                     else
@@ -852,7 +849,7 @@ function TelegramPlugin:init()
                     if ctx.selected_text and ctx.selected_text.text then
                         local raw = ctx.selected_text.text
                         local clean = DEPENDENCIES.text_util.cleanupSelectedText(raw)
-                        local data = SystemLayer.get_document_metadata(self.ui.document)
+                        local data = SystemLayer.get_document_metadata(self.ui.document, self.ui)
                         local msg = TelegramExporter.compose_message(clean, data, true)
                         TelegramExporter.execute_delivery(msg, ctx)
                     else
@@ -919,23 +916,16 @@ function TelegramPlugin:compareVersions(v1, v2)
 end
 
 function TelegramPlugin:checkRemoteVersion()
-    local http = load_dep("http")
     local url = "https://raw.githubusercontent.com/agaragou/errol.koplugin/refs/heads/main/_meta.lua"
-    -- Run in protected call to avoid crashes
-    local function runner()
-         local body, code = http.request(url)
+    pcall(function()
+         local body, code = Network.get(url)
          if code == 200 and body then
              local ver = body:match("version%s*=%s*[\"']([%d%.]+)[\"']")
-             if ver then
-                 self.remote_version = ver
-             end
+             if ver then self.remote_version = ver end
          end
-    end
-    -- We are already in a schedule from init, but let's not block too much.
-    -- Ideally this should possess its own timeout or run in a thread, 
-    -- but pure Lua threads are limited here. http.TIMEOUT is already set to 2s.
-    pcall(runner)
+    end)
 end
+
 
 function TelegramPlugin:onShowAbout()
     local DataStorage = require("datastorage")
@@ -1118,38 +1108,63 @@ function TelegramPlugin:show_highlights_browser(callback_close)
                     chapter = item.chapter
                 }
                 -- Generate what the message WOULD look like, for the preview
-                local preview_html = TelegramExporter.compose_message(item.text, data, opts)
+                local preview_payload = TelegramExporter.compose_message(item.text, data, opts)
+                local preview_html = type(preview_payload) == "table" and preview_payload.html or preview_payload
+                
+                local actions_dialog -- Forward declaration for closures
+
+                -- Build Buttons
+                local row_buttons = {
+                    {
+                        text = "Cancel",
+                        callback = function() actions_dialog:onClose() end,
+                    }
+                }
+
+                if item.ui_page and item.ui_page > 0 then
+                    table.insert(row_buttons, {
+                        text = "Go to Page",
+                        callback = function()
+                            local confirm = DEPENDENCIES.confirmbox:new{
+                                text = string.format(DEPENDENCIES.i18n("Are you sure you want to go to page %d?"), item.ui_page),
+                                ok_text = DEPENDENCIES.i18n("Go"),
+                                cancel_text = DEPENDENCIES.i18n("Cancel"),
+                                ok_callback = function()
+                                    actions_dialog:onClose()
+                                    -- Close the browser menu to show the book
+                                    if menu_instance and menu_instance.close_callback then
+                                        menu_instance.close_callback()
+                                    end
+                                    -- Save current location to history for "Go Back"
+                                    if self.ui.link then self.ui.link:addCurrentLocationToStack() end
+                                    self.ui:handleEvent(require("ui/event"):new("GotoPage", item.ui_page))
+                                end
+                            }
+                            DEPENDENCIES.ui:show(confirm)
+                        end
+                    })
+                end
+
+                table.insert(row_buttons, {
+                    text = "Spoiler",
+                    callback = function()
+                        actions_dialog:onClose()
+                        opts.spoiler = true 
+                        local msg = TelegramExporter.compose_message(item.text, data, opts)
+                        TelegramExporter.execute_delivery(msg, nil)
+                    end,
+                })
+                table.insert(row_buttons, {
+                     text = "Send",
+                     callback = function()
+                         actions_dialog:onClose()
+                         local msg = TelegramExporter.compose_message(item.text, data, opts)
+                         TelegramExporter.execute_delivery(msg, nil)
+                     end,
+                })
 
                 -- Show Unified Action Dialog
-                local actions_dialog
-                actions_dialog = self:show_preview_dialog(preview_html, {
-                    {
-                        {
-                            text = "Cancel",
-                            callback = function() 
-                                actions_dialog:onClose()
-                            end,
-                        },
-                        {
-                            text = "Spoiler",
-                            callback = function()
-                                actions_dialog:onClose()
-                                -- Force spoiler override
-                                opts.spoiler = true 
-                                local msg = TelegramExporter.compose_message(item.text, data, opts)
-                                TelegramExporter.execute_delivery(msg, nil)
-                            end,
-                        },
-                         {
-                            text = "Send",
-                            callback = function()
-                                actions_dialog:onClose()
-                                local msg = TelegramExporter.compose_message(item.text, data, opts)
-                                TelegramExporter.execute_delivery(msg, nil)
-                            end,
-                        },
-                    }
-                })
+                actions_dialog = self:show_preview_dialog(preview_html, { row_buttons })
             end
         })
     end
@@ -1539,34 +1554,73 @@ function TelegramPlugin:show_queue_manager(on_close_callback)
     }}
 
     for i, item in ipairs(q) do
+        local txt_content = type(item.text) == "table" and item.text.html or item.text
         table.insert(menu_items, {
-            text = string.format("%d. %s", i, TelegramExporter.get_preview(item.text)),
+            text = string.format("%d. %s", i, TelegramExporter.get_preview(txt_content)),
             keep_menu_open = true,
-            callback = function()
+            callback = function(menu_instance)
                 local actions_dialog
-                actions_dialog = self:show_preview_dialog(item.text, {
+                local meta = (type(item.text) == "table" and item.text.meta) or {}
+                
+                -- Build Buttons
+                local row_buttons = {
                     {
-                        {
-                            text = DEPENDENCIES.i18n("Cancel"),
-                            callback = function()
-                                actions_dialog:onClose()
-                            end
-                        },
-                        {
-                            text = DEPENDENCIES.i18n("Remove"),
-                            callback = function()
-                                if CacheManager.remove_item(i) then
-                                     DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Deleted", duration = 1 })
-                                     actions_dialog:onClose()
-                                     DEPENDENCIES.ui:close(menu_container)
-                                     self:show_queue_manager(on_close_callback)
-                                else
-                                     DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Error deleting", duration = 2 })
-                                end
-                            end
-                        }
+                        text = DEPENDENCIES.i18n("Cancel"),
+                        callback = function() actions_dialog:onClose() end,
                     }
+                }
+
+                -- Check if we can jump to page
+                -- 1. Must have page info
+                -- 2. Must be in a document
+                -- 3. Must match the current document path
+                if meta.page_num and meta.source_path and self.ui.document and self.ui.document.file then
+                     if meta.source_path == self.ui.document.file then
+                          table.insert(row_buttons, {
+                              text = "Go to Page",
+                              callback = function()
+                                  local confirm = DEPENDENCIES.confirmbox:new{
+                                      text = string.format(DEPENDENCIES.i18n("Are you sure you want to go to page %d?"), meta.page_num),
+                                      ok_text = DEPENDENCIES.i18n("Go"),
+                                      cancel_text = DEPENDENCIES.i18n("Cancel"),
+                                      ok_callback = function()
+                                          actions_dialog:onClose()
+                                          -- Close the queue menu
+                                          if menu_instance and menu_instance.close_callback then
+                                              menu_instance.close_callback()
+                                          end
+                                          -- Save current location to history for "Go Back"
+                                          if self.ui.link then self.ui.link:addCurrentLocationToStack() end
+                                          self.ui:handleEvent(require("ui/event"):new("GotoPage", meta.page_num))
+                                      end
+                                  }
+                                  DEPENDENCIES.ui:show(confirm)
+                              end
+                          })
+                     end
+                end
+
+                table.insert(row_buttons, {
+                    text = DEPENDENCIES.i18n("Remove"),
+                    callback = function()
+                        if CacheManager.remove_item(i) then
+                             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Deleted", duration = 1 })
+                             actions_dialog:onClose()
+                             -- Refresh queue by closing and re-opening? 
+                             -- Or just close menu.
+                             -- Ideally refresh, but we need to close to refresh properly or update items in place.
+                             -- The simplistic approach:
+                             if menu_instance and menu_instance.close_callback then
+                                 menu_instance.close_callback()
+                             end
+                             self:show_queue_manager(on_close_callback)
+                        else
+                             DEPENDENCIES.ui:show(DEPENDENCIES.info:new{ text = "Error deleting", duration = 2 })
+                        end
+                    end
                 })
+
+                actions_dialog = self:show_preview_dialog(txt_content, { row_buttons })
             end
         })
     end
@@ -1588,7 +1642,7 @@ function TelegramPlugin:show_queue_manager(on_close_callback)
     -- Override onMenuSelect to support keep_menu_open
     function queue_menu:onMenuSelect(item)
         if item.callback then
-            item.callback()
+            item.callback(self)
         end
         if not item.keep_menu_open and self.close_callback then
             self.close_callback()
